@@ -1,0 +1,22 @@
+# macOS
+.DS_Store
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.Python
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+
+# Environment — never commit real credentials
+.env
+
+# Generated data and chart outputs
+data/
+
+# Jupyter
+.ipynb_checkpoints/
