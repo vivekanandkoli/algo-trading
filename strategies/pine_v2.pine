@@ -1,0 +1,178 @@
+// ════════════════════════════════════════════════════════════════════════════
+//  EMA Crossover v2  —  ADX Trend Filter + RSI Filter + ATR Stop-Loss
+//  Ported from Python backtest project (github.com/vivekanandkoli/algo-trading)
+//
+//  How to use on Kite / TradingView:
+//    1. Open any NSE chart on Kite (kite.zerodha.com)
+//    2. Scroll to bottom → click "Pine Editor"
+//    3. Paste this entire script  →  "Add to chart"
+//    4. Green triangles = BUY signals  |  Red triangles = SELL signals
+//    5. Dashed red line = active stop-loss level
+//
+//  Works as both a visual indicator AND a full strategy with backtest stats.
+// ════════════════════════════════════════════════════════════════════════════
+
+//@version=5
+strategy(
+    title              = "EMA v2 · ADX + RSI + ATR Stop-Loss",
+    shorttitle         = "EMAv2",
+    overlay            = true,
+    default_qty_type   = strategy.percent_of_equity,
+    default_qty_value  = 100,
+    commission_type    = strategy.commission.percent,
+    commission_value   = 0.05,       // 0.05% per side (matches Python backtest)
+    initial_capital    = 100000,
+    currency           = currency.INR
+)
+
+// ── inputs ────────────────────────────────────────────────────────────────────
+grp_ema = "EMA Settings"
+fast_len   = input.int(9,  "Fast EMA period", minval=2,  group=grp_ema)
+slow_len   = input.int(21, "Slow EMA period", minval=3,  group=grp_ema)
+
+grp_adx = "ADX Filter"
+adx_len    = input.int(14,   "ADX period",     minval=5,  group=grp_adx)
+adx_thresh = input.float(25, "ADX threshold",  minval=10, group=grp_adx,
+                          tooltip="Only trade when ADX is above this — confirms a real trend")
+
+grp_rsi = "RSI Filter"
+rsi_len    = input.int(14,   "RSI period",     minval=5,  group=grp_rsi)
+rsi_low    = input.float(40, "RSI lower bound", group=grp_rsi,
+                          tooltip="Skip buy if RSI is below this (too weak)")
+rsi_high   = input.float(70, "RSI upper bound", group=grp_rsi,
+                          tooltip="Skip buy if RSI is above this (overbought)")
+
+grp_sl  = "Stop-Loss"
+atr_len    = input.int(14,  "ATR period",      minval=5,  group=grp_sl)
+atr_mult   = input.float(2.0,"ATR multiplier", minval=0.5, step=0.5, group=grp_sl,
+                          tooltip="Stop = entry − (multiplier × ATR at entry)")
+
+
+// ── indicators ────────────────────────────────────────────────────────────────
+ema_fast = ta.ema(close, fast_len)
+ema_slow = ta.ema(close, slow_len)
+
+[_diplus, _diminus, adx] = ta.dmi(adx_len, adx_len)
+
+rsi = ta.rsi(close, rsi_len)
+atr = ta.atr(atr_len)
+
+
+// ── signal logic ──────────────────────────────────────────────────────────────
+cross_up   = ta.crossover(ema_fast, ema_slow)
+cross_down = ta.crossunder(ema_fast, ema_slow)
+
+adx_ok = adx > adx_thresh
+rsi_ok = rsi >= rsi_low and rsi <= rsi_high
+
+buy_signal  = cross_up   and adx_ok and rsi_ok
+sell_signal = cross_down
+
+// Track stop-loss level — set at entry, held until exit
+var float stop_level = na
+if buy_signal
+    stop_level := close - atr_mult * atr
+if sell_signal or strategy.position_size == 0
+    stop_level := na
+
+stop_hit = strategy.position_size > 0 and not na(stop_level) and low <= stop_level
+
+
+// ── strategy entries / exits ──────────────────────────────────────────────────
+if buy_signal
+    strategy.entry("Long", strategy.long)
+
+if sell_signal
+    strategy.close("Long", comment="EMA cross")
+
+if stop_hit
+    strategy.exit("StopLoss", "Long", stop=stop_level, comment="ATR stop")
+
+
+// ── visuals ───────────────────────────────────────────────────────────────────
+
+// EMA lines
+p_fast = plot(ema_fast, "EMA " + str.tostring(fast_len),
+              color=color.new(color.orange, 0), linewidth=2)
+p_slow = plot(ema_slow, "EMA " + str.tostring(slow_len),
+              color=color.new(color.blue,   0), linewidth=2)
+
+// EMA ribbon fill
+fill(p_fast, p_slow,
+     color=ema_fast > ema_slow
+           ? color.new(color.green, 88)
+           : color.new(color.red,   88),
+     title="EMA ribbon")
+
+// Active stop-loss line (dashed red, only while in a trade)
+plot(strategy.position_size > 0 ? stop_level : na,
+     "Stop-Loss", color=color.new(color.red, 20),
+     style=plot.style_linebr, linewidth=1)
+
+// Buy / Sell signal markers
+plotshape(buy_signal,
+    title    = "BUY",
+    style    = shape.triangleup,
+    location = location.belowbar,
+    color    = color.new(color.lime, 0),
+    size     = size.small,
+    text     = "BUY")
+
+plotshape(sell_signal,
+    title    = "SELL",
+    style    = shape.triangledown,
+    location = location.abovebar,
+    color    = color.new(color.red, 0),
+    size     = size.small,
+    text     = "SELL")
+
+// Stop-loss hit marker
+plotshape(stop_hit,
+    title    = "STOP",
+    style    = shape.xcross,
+    location = location.belowbar,
+    color    = color.new(color.orange, 0),
+    size     = size.tiny,
+    text     = "SL")
+
+// Filtered-out signals (ADX or RSI blocked a potential buy) — shown as small dots
+blocked_buy = cross_up and not (adx_ok and rsi_ok)
+plotshape(blocked_buy,
+    title    = "Blocked (filtered)",
+    style    = shape.circle,
+    location = location.belowbar,
+    color    = color.new(color.gray, 50),
+    size     = size.tiny)
+
+
+// ── info table (top-right corner) ─────────────────────────────────────────────
+var table info = table.new(position.top_right, 2, 5,
+                            bgcolor=color.new(color.black, 70),
+                            border_color=color.new(color.gray, 50),
+                            border_width=1)
+
+if barstate.islast
+    adx_color = adx > adx_thresh ? color.lime : color.red
+    rsi_color = rsi >= rsi_low and rsi <= rsi_high ? color.lime : color.red
+    pos_color = strategy.position_size > 0 ? color.lime : color.gray
+
+    table.cell(info, 0, 0, "Indicator", text_color=color.gray,  text_size=size.small)
+    table.cell(info, 1, 0, "Value",     text_color=color.gray,  text_size=size.small)
+
+    table.cell(info, 0, 1, "ADX",       text_color=color.white, text_size=size.small)
+    table.cell(info, 1, 1, str.tostring(math.round(adx, 1)) +
+               (adx > adx_thresh ? " ✓" : " ✗"),
+               text_color=adx_color, text_size=size.small)
+
+    table.cell(info, 0, 2, "RSI",       text_color=color.white, text_size=size.small)
+    table.cell(info, 1, 2, str.tostring(math.round(rsi, 1)) +
+               (rsi >= rsi_low and rsi <= rsi_high ? " ✓" : " ✗"),
+               text_color=rsi_color, text_size=size.small)
+
+    table.cell(info, 0, 3, "ATR",       text_color=color.white, text_size=size.small)
+    table.cell(info, 1, 3, str.tostring(math.round(atr, 1)),
+               text_color=color.white, text_size=size.small)
+
+    table.cell(info, 0, 4, "Position",  text_color=color.white, text_size=size.small)
+    table.cell(info, 1, 4, strategy.position_size > 0 ? "LONG" : "FLAT",
+               text_color=pos_color, text_size=size.small)
