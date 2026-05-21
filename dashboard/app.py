@@ -42,6 +42,11 @@ def get_signals(symbol, period):
 def get_backtest(symbol, period, version):
     return run_backtest(symbol, period=period, version=version)
 
+@st.cache_data(ttl=300)
+def get_signals_mr(symbol, period):
+    from strategies.mean_reversion import add_signals as mr_signals
+    return mr_signals(fetch_historical(symbol, period=period))
+
 # ── sidebar ────────────────────────────────────────────────────────────────────
 with st.sidebar:
     st.markdown("## 📈 NSE Algo")
@@ -64,8 +69,8 @@ st.markdown("# 📈 NSE Algo Trading Dashboard")
 st.caption("EMA Crossover v2 · ADX + RSI filters · ATR stop-loss · yfinance data")
 st.divider()
 
-tab_scan, tab_chart, tab_trades, tab_bt = st.tabs(
-    ["📡 Scanner", "📊 Strategy Chart", "📋 Paper Trades", "🔬 Backtest"]
+tab_scan, tab_chart, tab_trades, tab_bt, tab_mr = st.tabs(
+    ["📡 Scanner", "📊 EMA v2 Chart", "📋 Paper Trades", "🔬 Backtest", "🔄 Mean Reversion"]
 )
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -434,3 +439,183 @@ with tab_bt:
 
         except Exception as e:
             st.error(f"Backtest error: {e}")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# TAB 5 — MEAN REVERSION
+# ══════════════════════════════════════════════════════════════════════════════
+with tab_mr:
+    st.subheader(f"Mean Reversion — Bollinger Band + RSI  ·  {LABELS[selected]}")
+    st.caption("Buy: Close ≤ lower BB(20,2)  AND  RSI < 35  ·  "
+               "Sell: Close ≥ upper BB  OR  RSI > 65  OR  2×ATR stop-loss")
+
+    from strategies.mean_reversion import RSI_BUY, RSI_SELL, RSI_PERIOD, BB_PERIOD, BB_MULT
+
+    try:
+        df_mr = get_signals_mr(selected, period)
+
+        mr_buys  = df_mr[df_mr["signal"] == 1]
+        mr_sells = df_mr[df_mr["signal"] == -1]
+
+        # ── Bollinger Band + RSI chart ──────────────────────────────────────
+        fig_mr = make_subplots(
+            rows=2, cols=1,
+            shared_xaxes=True,
+            vertical_spacing=0.04,
+            row_heights=[0.68, 0.32],
+            subplot_titles=(
+                f"Price + Bollinger Bands ({BB_PERIOD}, {BB_MULT}σ)",
+                f"RSI({RSI_PERIOD})  —  buy < {RSI_BUY}  ·  sell > {RSI_SELL}",
+            ),
+        )
+
+        # BB shaded region
+        fig_mr.add_trace(go.Scatter(
+            x=pd.concat([df_mr.index.to_series(),
+                         df_mr.index.to_series()[::-1]]),
+            y=pd.concat([df_mr["BB_UPPER"], df_mr["BB_LOWER"][::-1]]),
+            fill="toself",
+            fillcolor="rgba(77,184,255,0.08)",
+            line=dict(color="rgba(0,0,0,0)"),
+            showlegend=False, name="BB band"), row=1, col=1)
+
+        # BB lines
+        fig_mr.add_trace(go.Scatter(
+            x=df_mr.index, y=df_mr["BB_UPPER"], name="Upper BB",
+            line=dict(color=C_RED,  width=1.2, dash="dot")), row=1, col=1)
+        fig_mr.add_trace(go.Scatter(
+            x=df_mr.index, y=df_mr["BB_MID"],   name="Mid BB (SMA20)",
+            line=dict(color=C_MUTED, width=1.0, dash="dash")), row=1, col=1)
+        fig_mr.add_trace(go.Scatter(
+            x=df_mr.index, y=df_mr["BB_LOWER"], name="Lower BB",
+            line=dict(color=C_GREEN, width=1.2, dash="dot")), row=1, col=1)
+
+        # Close price
+        fig_mr.add_trace(go.Scatter(
+            x=df_mr.index, y=df_mr["Close"], name="Close",
+            line=dict(color="white", width=1.4)), row=1, col=1)
+
+        # Buy / sell markers
+        if not mr_buys.empty:
+            fig_mr.add_trace(go.Scatter(
+                x=mr_buys.index, y=mr_buys["Close"], mode="markers",
+                name="BUY (lower BB + RSI<35)",
+                marker=dict(symbol="triangle-up", size=13, color=C_GREEN,
+                            line=dict(width=1, color="white"))), row=1, col=1)
+
+        if not mr_sells.empty:
+            fig_mr.add_trace(go.Scatter(
+                x=mr_sells.index, y=mr_sells["Close"], mode="markers",
+                name="SELL (upper BB / RSI>65)",
+                marker=dict(symbol="triangle-down", size=13, color=C_RED,
+                            line=dict(width=1, color="white"))), row=1, col=1)
+
+        # RSI
+        fig_mr.add_trace(go.Scatter(
+            x=df_mr.index, y=df_mr["RSI"], name="RSI",
+            line=dict(color="#ff9800", width=1.5)), row=2, col=1)
+
+        fig_mr.add_hrect(y0=RSI_BUY, y1=RSI_SELL, row=2, col=1,
+                         fillcolor="rgba(0,200,83,0.07)", line_width=0)
+        fig_mr.add_hline(y=RSI_SELL, line_dash="dot", line_color=C_RED,   row=2, col=1,
+                         annotation_text=f"Sell {RSI_SELL}")
+        fig_mr.add_hline(y=RSI_BUY,  line_dash="dot", line_color=C_GREEN, row=2, col=1,
+                         annotation_text=f"Buy {RSI_BUY}")
+        fig_mr.add_hline(y=50, line_dash="dash", line_color="gray", row=2, col=1)
+
+        fig_mr.update_layout(
+            template="plotly_dark",
+            height=620,
+            margin=dict(l=0, r=0, t=40, b=0),
+            hovermode="x unified",
+            legend=dict(orientation="h", yanchor="bottom", y=1.02,
+                        xanchor="right", x=1),
+        )
+        fig_mr.update_yaxes(title_text="Price ₹", row=1, col=1)
+        fig_mr.update_yaxes(title_text="RSI",     row=2, col=1, range=[0, 100])
+
+        st.plotly_chart(fig_mr, use_container_width=True)
+
+        # quick stats
+        qs1, qs2, qs3, qs4 = st.columns(4)
+        lat_mr = df_mr.iloc[-1]
+        qs1.metric("BB Lower",  f"₹{lat_mr['BB_LOWER']:,.1f}")
+        qs2.metric("BB Upper",  f"₹{lat_mr['BB_UPPER']:,.1f}")
+        qs3.metric("RSI",       f"{lat_mr['RSI']:.1f}",
+                   delta="oversold ✓" if lat_mr["RSI"] < RSI_BUY else
+                         ("overbought" if lat_mr["RSI"] > RSI_SELL else "neutral"),
+                   delta_color="normal" if lat_mr["RSI"] < RSI_BUY else "off")
+        qs4.metric("BB Width",  f"{lat_mr['BB_WIDTH']:.3f}",
+                   help="Normalised band width — low = squeeze = breakout pending")
+
+    except Exception as e:
+        st.error(f"Chart error: {e}")
+
+    st.divider()
+
+    # ── comparison table: MR vs EMA v2 vs B&H ──────────────────────────────
+    st.markdown("#### Strategy Comparison — All Symbols")
+    st.caption("Mean Reversion (v3) vs EMA Crossover (v2) vs Buy & Hold")
+
+    if st.button("▶  Run comparison across all 5 symbols", key="run_mr_cmp"):
+        cmp_rows = []
+        prog2    = st.progress(0)
+
+        for idx, sym in enumerate(SYMBOLS):
+            rv2 = get_backtest(sym, period, "v2")
+            rv3 = get_backtest(sym, period, "v3")
+
+            # colour helpers for st.dataframe
+            def _r(v):
+                return f"{v:+.1f}%" if isinstance(v, (int, float)) else str(v)
+
+            cmp_rows.append({
+                "Symbol":        LABELS[sym],
+                "MR Return":     _r(rv3["total_return_pct"]),
+                "EMA v2 Return": _r(rv2["total_return_pct"]),
+                "B&H Return":    _r(rv2["bnh_return_pct"]),
+                "MR Sharpe":     f"{rv3['sharpe']:+.2f}",
+                "v2 Sharpe":     f"{rv2['sharpe']:+.2f}",
+                "MR MaxDD":      f"{rv3['max_drawdown_pct']:.1f}%",
+                "v2 MaxDD":      f"{rv2['max_drawdown_pct']:.1f}%",
+                "MR WinRate":    f"{rv3['win_rate_pct']:.0f}%",
+                "v2 WinRate":    f"{rv2['win_rate_pct']:.0f}%",
+                "MR Trades":     rv3["num_trades"],
+                "v2 Trades":     rv2["num_trades"],
+            })
+            prog2.progress((idx + 1) / len(SYMBOLS))
+
+        st.dataframe(pd.DataFrame(cmp_rows),
+                     use_container_width=True, hide_index=True)
+
+        # ── equity curves for selected symbol ──────────────────────────────
+        rv2_sel = get_backtest(selected, period, "v2")
+        rv3_sel = get_backtest(selected, period, "v3")
+
+        fig_cmp = go.Figure()
+        fig_cmp.add_trace(go.Scatter(
+            x=rv3_sel["equity"].index, y=rv3_sel["equity"],
+            name="Mean Reversion (v3)",
+            line=dict(color=C_PURPLE, width=2.2)))
+        fig_cmp.add_trace(go.Scatter(
+            x=rv2_sel["equity"].index, y=rv2_sel["equity"],
+            name="EMA v2",
+            line=dict(color=C_YELLOW, width=1.8)))
+        fig_cmp.add_trace(go.Scatter(
+            x=rv2_sel["bnh_equity"].index, y=rv2_sel["bnh_equity"],
+            name="Buy & Hold",
+            line=dict(color=C_BLUE, width=1.6, dash="dash")))
+        fig_cmp.add_hline(y=100_000, line_dash="dot", line_color="gray",
+                          annotation_text="Initial ₹1L")
+
+        fig_cmp.update_layout(
+            template="plotly_dark",
+            height=360,
+            title=f"Equity Curves — {LABELS[selected]}",
+            margin=dict(l=0, r=0, t=40, b=0),
+            yaxis_title="Portfolio Value (₹)",
+            hovermode="x unified",
+            legend=dict(orientation="h", yanchor="bottom", y=1.02,
+                        xanchor="right", x=1),
+        )
+        st.plotly_chart(fig_cmp, use_container_width=True)

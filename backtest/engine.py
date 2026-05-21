@@ -1,5 +1,9 @@
 """
-Backtesting engine — supports EMA v1 (vectorised) and v2 (event-driven + stop-loss).
+Backtesting engine.
+
+v1  — EMA crossover, vectorised
+v2  — EMA + ADX/RSI filters, event-driven with ATR stop-loss
+v3  — Bollinger Band + RSI mean reversion, event-driven with ATR stop-loss
 """
 
 import sys
@@ -104,49 +108,51 @@ def _run_v1(df: pd.DataFrame, symbol: str) -> dict:
     return _metrics(df["equity"], df["bnh_equity"], real_trades, df, symbol)
 
 
-# ── v2: event-driven backtester with ATR stop-loss ────────────────────────────
+# ── event-driven backtester (shared by v2 and v3) ────────────────────────────
 
-def _run_v2(df: pd.DataFrame, symbol: str) -> dict:
-    from strategies.ema_crossover_v2 import ATR_MULTIPLIER
+def _run_event_driven(df: pd.DataFrame, symbol: str,
+                      atr_multiplier: float = 2.0) -> dict:
+    """
+    Generic event-driven backtester with ATR-based stop-loss.
 
+    Expects df to have columns: Close, Low, ATR, signal (1=buy, -1=sell).
+    Used by v2 (EMA filtered) and v3 (mean reversion).
+    """
     capital     = float(INITIAL_CAPITAL)
-    position    = 0       # 0=flat, 1=long
+    position    = 0
     entry_price = 0.0
     stop_level  = 0.0
-    shares      = 0.0     # fractional units held
-    inv_capital = 0.0     # capital committed at entry (after buy cost)
+    shares      = 0.0
+    inv_capital = 0.0
     trades      = []
     equity_curve = []
 
     for _, row in df.iterrows():
-        # ── check exits ────────────────────────────────────────────────────
+        # ── exits ──────────────────────────────────────────────────────────
         if position == 1:
-            stop_hit = (row["Low"] <= stop_level)
-            ema_exit = (row["signal"] == -1)
+            stop_hit  = (row["Low"] <= stop_level)
+            sig_exit  = (row["signal"] == -1)
 
-            if stop_hit or ema_exit:
+            if stop_hit or sig_exit:
                 exit_px  = stop_level if stop_hit else row["Close"]
-                # proceeds = shares sold × exit price × (1 − sell cost)
                 proceeds = shares * exit_px * (1 - TRANSACTION_COST)
                 trades.append(proceeds / inv_capital - 1)
                 capital  = proceeds
                 position = 0
 
-        # ── check entry ────────────────────────────────────────────────────
+        # ── entry ───────────────────────────────────────────────────────────
         if position == 0 and row["signal"] == 1:
             entry_price = row["Close"]
-            stop_level  = entry_price - ATR_MULTIPLIER * row["ATR"]
-            # buy: spend capital; get shares net of buy cost
-            inv_capital = capital               # what we put in (before buy cost)
+            stop_level  = entry_price - atr_multiplier * row["ATR"]
+            inv_capital = capital
             shares      = capital * (1 - TRANSACTION_COST) / entry_price
             position    = 1
 
-        # ── mark-to-market ─────────────────────────────────────────────────
+        # ── mark-to-market ──────────────────────────────────────────────────
         equity_curve.append(shares * row["Close"] if position == 1 else capital)
 
     equity     = pd.Series(equity_curve, index=df.index)
     bnh_equity = INITIAL_CAPITAL * (df["Close"] / df["Close"].iloc[0])
-
     return _metrics(equity, bnh_equity, trades, df, symbol)
 
 
@@ -160,7 +166,9 @@ def run_backtest(symbol: str = "^NSEI", period: str = "2y",
     Args:
         symbol  : NSE ticker or index ("^NSEI", "RELIANCE.NS", …)
         period  : yfinance period string ("2y", "1y", "5y", …)
-        version : "v1" (original EMA crossover) | "v2" (+ ADX/RSI/ATR-stoploss)
+        version : "v1" EMA crossover
+                  "v2" EMA + ADX/RSI filters + ATR stop-loss
+                  "v3" Bollinger Band + RSI mean reversion + ATR stop-loss
     """
     raw = fetch_historical(symbol, period=period)
 
@@ -168,19 +176,26 @@ def run_backtest(symbol: str = "^NSEI", period: str = "2y",
         from strategies.ema_crossover import add_signals
         df = add_signals(raw)
         return _run_v1(df, symbol)
+
     elif version == "v2":
-        from strategies.ema_crossover_v2 import add_signals
+        from strategies.ema_crossover_v2 import add_signals, ATR_MULTIPLIER
         df = add_signals(raw)
-        return _run_v2(df, symbol)
+        return _run_event_driven(df, symbol, atr_multiplier=ATR_MULTIPLIER)
+
+    elif version == "v3":
+        from strategies.mean_reversion import add_signals, ATR_MULTIPLIER
+        df = add_signals(raw)
+        return _run_event_driven(df, symbol, atr_multiplier=ATR_MULTIPLIER)
+
     else:
-        raise ValueError(f"Unknown version '{version}'. Use 'v1' or 'v2'.")
+        raise ValueError(f"Unknown version '{version}'. Use 'v1', 'v2', or 'v3'.")
 
 
 def print_results(r: dict, label: str = "") -> None:
     tag = f" [{label}]" if label else ""
-    sep = "─" * 42
+    sep = "─" * 44
     print(f"\n{sep}")
-    print(f"  EMA Crossover Backtest{tag} — {r['symbol']}")
+    print(f"  Backtest{tag} — {r['symbol']}")
     print(sep)
     print(f"  Strategy return  : {r['total_return_pct']:+.2f}%")
     print(f"  Buy & Hold return: {r['bnh_return_pct']:+.2f}%")
@@ -192,5 +207,5 @@ def print_results(r: dict, label: str = "") -> None:
 
 
 if __name__ == "__main__":
-    for v in ("v1", "v2"):
+    for v in ("v1", "v2", "v3"):
         print_results(run_backtest(version=v), label=v)
